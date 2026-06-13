@@ -1,9 +1,62 @@
 import io
+import os
 import base64
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 from flask import Flask, request, jsonify, render_template_string
+
+
+def configure_chinese_font():
+    font_candidates = [
+        'Microsoft YaHei',
+        'SimHei',
+        'SimSun',
+        'KaiTi',
+        'FangSong',
+        'Arial Unicode MS',
+        'PingFang SC',
+        'Noto Sans CJK SC',
+        'WenQuanYi Zen Hei',
+        'Source Han Sans CN',
+    ]
+
+    available_fonts = {f.name for f in font_manager.fontManager.ttflist}
+
+    for font_name in font_candidates:
+        if font_name in available_fonts:
+            plt.rcParams['font.sans-serif'] = [font_name]
+            plt.rcParams['axes.unicode_minus'] = False
+            return font_name
+
+    font_dirs = [
+        os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts'),
+        '/System/Library/Fonts',
+        '/usr/share/fonts',
+    ]
+
+    for font_dir in font_dirs:
+        if os.path.isdir(font_dir):
+            for file in os.listdir(font_dir):
+                if file.lower().endswith(('.ttf', '.ttc', '.otf')):
+                    if any(kw in file.lower() for kw in ['yahei', 'simhei', 'simsun', 'pingfang', 'noto', 'cjk', 'wqy']):
+                        try:
+                            font_path = os.path.join(font_dir, file)
+                            font_manager.fontManager.addfont(font_path)
+                            font_name = font_manager.FontProperties(fname=font_path).get_name()
+                            plt.rcParams['font.sans-serif'] = [font_name]
+                            plt.rcParams['axes.unicode_minus'] = False
+                            return font_name
+                        except Exception:
+                            continue
+
+    plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+    return None
+
+
+configure_chinese_font()
 
 app = Flask(__name__)
 
@@ -94,6 +147,53 @@ HTML_TEMPLATE = """
             background: #fff1f0;
             border-radius: 5px;
         }
+        .options {
+            margin: 20px 0;
+            padding: 15px;
+            background: #fafafa;
+            border-radius: 8px;
+            border: 1px solid #eee;
+        }
+        .options h4 {
+            margin: 0 0 12px 0;
+            color: #333;
+        }
+        .option-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+        .option-row:last-child {
+            margin-bottom: 0;
+        }
+        .option-row label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            color: #444;
+        }
+        .option-row input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        .option-row input[type="range"] {
+            width: 200px;
+            cursor: pointer;
+        }
+        .option-value {
+            font-weight: bold;
+            color: #1890ff;
+            min-width: 40px;
+        }
+        .option-hint {
+            font-size: 12px;
+            color: #888;
+        }
     </style>
 </head>
 <body>
@@ -117,6 +217,22 @@ HTML_TEMPLATE = """
                 <button onclick="removeRow(this)">删除</button>
             </div>
         </div>
+
+        <div class="options">
+            <h4>📐 图表选项</h4>
+            <div class="option-row">
+                <label>
+                    <input type="checkbox" id="donut-mode" checked onchange="toggleDonutOptions()">
+                    <strong>环形图模式</strong> <span class="option-hint">(中心留白，更美观)</span>
+                </label>
+            </div>
+            <div class="option-row" id="donut-size-row">
+                <label>中心留白大小：</label>
+                <input type="range" id="hole-size" min="30" max="85" value="70" oninput="updateHoleSizeDisplay()">
+                <span class="option-value" id="hole-size-value">70%</span>
+            </div>
+        </div>
+
         <div class="actions">
             <button class="btn-add" onclick="addRow()">+ 添加一行</button>
             <button class="btn-generate" onclick="generatePie()">生成饼图</button>
@@ -178,10 +294,12 @@ HTML_TEMPLATE = """
             hideError();
             document.getElementById('result').innerHTML = '<p>正在生成...</p>';
 
+            const chartOptions = getChartOptions();
+
             fetch('/api/pie', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ labels, values })
+                body: JSON.stringify({ labels, values, ...chartOptions })
             })
             .then(res => res.json())
             .then(data => {
@@ -204,6 +322,24 @@ HTML_TEMPLATE = """
 
         function hideError() {
             document.getElementById('error').style.display = 'none';
+        }
+
+        function toggleDonutOptions() {
+            const donutChecked = document.getElementById('donut-mode').checked;
+            const sizeRow = document.getElementById('donut-size-row');
+            sizeRow.style.opacity = donutChecked ? '1' : '0.4';
+            sizeRow.style.pointerEvents = donutChecked ? 'auto' : 'none';
+        }
+
+        function updateHoleSizeDisplay() {
+            const value = document.getElementById('hole-size').value;
+            document.getElementById('hole-size-value').textContent = value + '%';
+        }
+
+        function getChartOptions() {
+            const donut = document.getElementById('donut-mode').checked;
+            const holeSize = parseInt(document.getElementById('hole-size').value) / 100;
+            return { donut, hole_size: holeSize };
         }
     </script>
 </body>
@@ -237,8 +373,13 @@ def merge_small_categories(labels, values, threshold=0.05):
     return merged_labels, merged_values
 
 
-def generate_pie_chart(labels, values):
+def generate_pie_chart(labels, values, donut=True, hole_size=0.70):
     labels, values = merge_small_categories(labels, values)
+
+    if hole_size < 0.3:
+        hole_size = 0.3
+    elif hole_size > 0.85:
+        hole_size = 0.85
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
@@ -246,14 +387,22 @@ def generate_pie_chart(labels, values):
     if len(labels) > len(colors):
         colors = plt.cm.tab20.colors
 
+    if donut:
+        wedgeprops = {'width': 1.0 - hole_size, 'edgecolor': 'white', 'linewidth': 2}
+        pctdistance = hole_size + (1.0 - hole_size) * 0.5
+    else:
+        wedgeprops = {'edgecolor': 'white', 'linewidth': 1}
+        pctdistance = 0.75
+
     wedges, texts, autotexts = ax.pie(
         values,
         labels=labels,
         autopct='%1.1f%%',
         startangle=90,
         colors=colors[:len(labels)],
-        pctdistance=0.85,
-        textprops={'fontsize': 12}
+        pctdistance=pctdistance,
+        textprops={'fontsize': 12},
+        wedgeprops=wedgeprops
     )
 
     for autotext in autotexts:
@@ -261,10 +410,11 @@ def generate_pie_chart(labels, values):
         autotext.set_fontweight('bold')
 
     ax.axis('equal')
-    ax.set_title('数据分布饼图', fontsize=16, fontweight='bold', pad=20)
 
-    centre_circle = plt.Circle((0, 0), 0.70, fc='white')
-    fig.gca().add_artist(centre_circle)
+    if donut:
+        ax.set_title('数据分布环形图', fontsize=16, fontweight='bold', pad=20)
+    else:
+        ax.set_title('数据分布饼图', fontsize=16, fontweight='bold', pad=20)
 
     plt.tight_layout()
 
@@ -304,7 +454,10 @@ def api_pie():
         if sum(values) <= 0:
             return jsonify({'success': False, 'error': '所有数值之和必须大于0'}), 400
 
-        image_base64 = generate_pie_chart(labels, values)
+        donut = data.get('donut', True)
+        hole_size = float(data.get('hole_size', 0.70))
+
+        image_base64 = generate_pie_chart(labels, values, donut=donut, hole_size=hole_size)
         return jsonify({'success': True, 'image': image_base64})
 
     except Exception as e:
