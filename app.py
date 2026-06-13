@@ -211,7 +211,35 @@ HTML_TEMPLATE = """
 """
 
 
+def merge_small_categories(labels, values, threshold=0.05):
+    total = sum(values)
+    if total <= 0:
+        return labels, values
+
+    merged_labels = []
+    merged_values = []
+    other_value = 0.0
+
+    for label, value in zip(labels, values):
+        if value / total < threshold:
+            other_value += value
+        else:
+            merged_labels.append(label)
+            merged_values.append(value)
+
+    if other_value > 0:
+        merged_labels.append('其他')
+        merged_values.append(other_value)
+
+    if len(merged_labels) < 2:
+        return labels, values
+
+    return merged_labels, merged_values
+
+
 def generate_pie_chart(labels, values):
+    labels, values = merge_small_categories(labels, values)
+
     fig, ax = plt.subplots(figsize=(8, 6))
 
     colors = plt.cm.Set3.colors
